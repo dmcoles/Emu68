@@ -113,10 +113,10 @@ uint32_t *EMIT_Exception(uint32_t *ptr, uint16_t exception, uint8_t format, ...)
     *ptr++ = bic_immed(cc, cc, 2, 32 - SRB_T0);
     *ptr++ = orr_immed(cc, cc, 1, 32 - SRB_S);
 
-    if (__m68k_state->JIT_CONTROL2 & JC2F_CHIP_SLOWDOWN)
-    {
-        *ptr++ = mov_reg(tracereg, 0);
-    }
+		if (__m68k_state->JIT_CONTROL2 & JC2F_TRACE_ENABLE)
+		{
+			*ptr++ = mov_immed_u16(tracereg, 0, 0);
+		}
 
     /* Load VBR */
     *ptr++ = ldr_offset(ctx, vbr, __builtin_offsetof(struct M68KState, VBR));
