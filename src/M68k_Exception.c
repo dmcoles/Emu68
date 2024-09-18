@@ -13,7 +13,7 @@
 #include "M68k.h"
 #include "RegisterAllocator.h"
 
-extern int tracereg;
+extern uint8_t tracereg;
 extern struct M68KState *__m68k_state;
 
 uint32_t *EMIT_Exception(uint32_t *ptr, uint16_t exception, uint8_t format, ...)
@@ -115,7 +115,7 @@ uint32_t *EMIT_Exception(uint32_t *ptr, uint16_t exception, uint8_t format, ...)
 
 		if (__m68k_state->JIT_CONTROL2 & JC2F_TRACE_ENABLE)
 		{
-			*ptr++ = mov_immed_u16(tracereg, 0, 0);
+			*ptr++ = mov_reg(tracereg, cc);
 		}
 
     /* Load VBR */
