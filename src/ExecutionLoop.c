@@ -12,6 +12,10 @@ extern struct List ICache[EMU68_HASHSIZE];
 void M68K_LoadContext(struct M68KState *ctx);
 void M68K_SaveContext(struct M68KState *ctx);
 
+uint8_t ariv_enabled = 0;
+uint8_t hrtmon_enabled = 0;
+uint8_t debounce_nmi = 0;
+
 static inline void CallARMCode()
 {
     register void *ARM asm("x12");
@@ -200,7 +204,7 @@ void MainLoop()
             int IPL_mask = (SR & SR_IPL) >> SRB_IPL;
 
             /* Any unmasked interrupts? Proceess them */
-            if (level == 7 || level > IPL_mask)
+            if ((level == 7 && !debounce_nmi) || level > IPL_mask)
             {
                 register uint64_t sp asm("r29");
 
@@ -247,8 +251,20 @@ void MainLoop()
                 /* Get VBR */
                 vbr = ctx->VBR;
 
-                /* Load PC */
-                asm volatile("ldr %w0, [%1, %2]":"=r"(PC):"r"(vbr),"r"(vector)); 
+                if (hrtmon_enabled && level==7)
+                {
+                    asm volatile("movz    %w0, #0x000c":"=r"(PC)); 
+                    asm volatile("movk    %w0, #0x00a1, lsl #16 ":"=r"(PC)); 
+                }
+                else if (ariv_enabled && level==7)
+                {
+                    asm volatile("ldr %w0, [%1, %2]":"=r"(PC):"r"(0xa10000),"r"(vector)); 
+                }
+                else
+                {
+                    /* Load PC */
+                    asm volatile("ldr %w0, [%1, %2]":"=r"(PC):"r"(vbr),"r"(vector)); 
+                }
             }
 
             /* All interrupts masked or new PC loaded and stack swapped, continue with code execution */

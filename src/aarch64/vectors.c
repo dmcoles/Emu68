@@ -324,6 +324,8 @@ int block_c0;
 
 int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
 {
+	extern uint8_t ariv_enabled;
+
     D(kprintf("[JIT:SYS] SYSWriteValToAddr(0x%x, %d, %p)\n", value, size, far));
 
     /*
@@ -333,6 +335,31 @@ int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
     if ((far >> 32) == 1 || (far >> 32) == 0xffffffff) {
         far &= 0xffffffff;
     }
+
+
+    if (ariv_enabled && far >= 0xdff000 && far <0xe00000)
+		{
+
+			switch(size)
+			{
+					case 1:
+							*(uint8_t*)((far & 0x1ff ) + 0xffffff9000a5f000) = value;
+							break;
+					case 2:
+							*(uint16_t*)((far & 0x1ff ) + 0xffffff9000a5f000) = value;
+							break;
+					case 4:
+							*(uint32_t*)((far & 0x1ff ) + 0xffffff9000a5f000) = value;
+							break;
+					case 8:
+							*(uint64_t*)((far & 0x1ff ) + 0xffffff9000a5f000) = value;
+							break;
+					case 16:
+							*(uint64_t*)((far & 0x1ff ) + 0xffffff9000a5f000) = value;
+							*(uint64_t*)((far & 0x1ff ) + 0xffffff9000a5f008) = value2;
+							break;
+			}
+		}
 
     if (far == INTENA) {
         if (value & 0x8000) {
