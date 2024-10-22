@@ -94,9 +94,9 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: emu68-archive
+        name: emu68-${{matrix.targ}}
         path: ${{runner.workspace}}/install/Emu68-${{matrix.targ}}.zip
-        retention-days: 5
+        #retention-days: 5
 
   deploy:
     runs-on: ubuntu-22.04
