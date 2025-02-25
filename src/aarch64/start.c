@@ -2191,7 +2191,8 @@ void M68K_StartEmu(void *addr, void *fdt)
 
                 if (decomp != NULL)
                 {
-                    const uint32_t ariv_size = 0x60000;
+                    //const uint32_t ariv_size = 0x60000;
+					const uint32_t ariv_size = 0x160000;
                     const uint32_t dest_addr = 0xA10000;
                     void *out_buffer = tlsf_malloc(tlsf, ariv_size);
                     size_t in_size = 0;
