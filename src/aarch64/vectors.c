@@ -87,6 +87,9 @@
 #define LOAD_CONTEXT    LOAD_SHORT_CONTEXT
 #endif
 
+extern void lock(uint8_t owner);
+extern void unlock(void);
+
 struct INT_shadow {
     uint16_t INTENA;
     uint16_t INTREQ;
@@ -2193,7 +2196,7 @@ void SYSHandler(uint32_t vector, uint64_t *ctx)
     asm volatile("mrs %0, ELR_EL1; mrs %1, SPSR_EL1":"=r"(elr),"=r"(spsr));
     asm volatile("mrs %0, ESR_EL1":"=r"(esr));
     asm volatile("mrs %0, FAR_EL1":"=r"(far));
-
+    lock(1);
     if ((vector & 0x1ff) == 0x00 && (esr & 0xf8000000) == 0x90000000)
     {
         int writeFault = (esr & (1 << 6)) != 0;
@@ -2336,6 +2339,7 @@ void SYSHandler(uint32_t vector, uint64_t *ctx)
             asm volatile("msr ELR_EL1, %0"::"r"(elr));
         }
     }
+		unlock();
 
     if (!handled)
     {
