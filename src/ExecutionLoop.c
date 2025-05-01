@@ -15,8 +15,6 @@ void M68K_SaveContext(struct M68KState *ctx);
 uint8_t ariv_enabled = 0;
 uint8_t hrtmon_enabled = 0;
 uint8_t debounce_nmi = 0;
-uint8_t joystickl7 = 0;
-uint8_t	joyl7trigger = 0;
 
 static inline void CallARMCode()
 {
@@ -81,7 +79,6 @@ extern volatile unsigned char bus_lock;
 
 static inline int GetIPLLevel()
 {
-	  if (joyl7trigger) return 7;
     volatile uint32_t *gpio = (void *)0xf2200000;
 
     *(gpio + 7) = LE32(REG_STATUS << PIN_A0);

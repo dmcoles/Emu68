@@ -33,7 +33,6 @@ extern uint8_t hrtmon_enabled;
 extern uint8_t ariv_enabled;
 
 extern uint8_t debounce_nmi;
-extern uint8_t joystickl7;
 
 void _start();
 void _boot();
@@ -584,7 +583,6 @@ void boot(void *dtree)
 
             hrtmon_enabled = !!find_token(prop->op_value, "hrtmon");
             debounce_nmi = !!find_token(prop->op_value, "debounce_nmi");
-						joystickl7 = !!find_token(prop->op_value, "joystick_l7");
 
 #ifdef PISTORM32LITE
             if (find_token(prop->op_value, "two_slot"))
