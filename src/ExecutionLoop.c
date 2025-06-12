@@ -11,10 +11,14 @@
 extern struct List ICache[EMU68_HASHSIZE];
 void M68K_LoadContext(struct M68KState *ctx);
 void M68K_SaveContext(struct M68KState *ctx);
+unsigned int ps_read_8(unsigned int address);
+unsigned int ps_read_16(unsigned int address);
+extern uint8_t debounce_nmi;
+extern uint8_t ariv_enabled;
+extern uint8_t hrtmon_enabled;
 
-uint8_t ariv_enabled = 0;
-uint8_t hrtmon_enabled = 0;
-uint8_t debounce_nmi = 0;
+extern volatile uint32_t *gpio;
+int SYSReadValFromAddr(uint64_t *value, uint64_t *value2, int size, uint64_t far);
 
 static inline void CallARMCode()
 {
@@ -134,6 +138,7 @@ void MainLoop()
     register uint16_t *PC asm("x18");
     register void *ARM asm("x12");
     uint16_t *LastPC;
+    int oldlevel = 0;
     struct M68KState *ctx = getCTX();
     
     M68K_LoadContext(ctx);
@@ -199,12 +204,37 @@ void MainLoop()
             }
 
             /* Get SR and test the IPL mask value */
-            SR = getSR();
+            SR = getSR();           
 
             int IPL_mask = (SR & SR_IPL) >> SRB_IPL;
 
-            /* Any unmasked interrupts? Proceess them */
-            if ((level == 7 && !debounce_nmi) || level > IPL_mask)
+            asm volatile("":"=r"(PC));
+
+						//debounce nmi
+            if (ariv_enabled && (level == 7) && (ctx->JIT_CONTROL2 & JC2F_ARACTIVE))	{
+							level = 0;
+						}
+
+            if (ariv_enabled && (level == 7) && (((uint64_t)PC&0xffffffff)>=0xa80000) && (((uint64_t)PC&0xffffffff)<0xac0000))	{
+							level = 0;
+						}
+
+            if (hrtmon_enabled && (level == 7) && (((uint64_t)PC&0xffffffff)>=0xa10000) && (((uint64_t)PC&0xffffffff)<0xa80000))	{
+							level = 0;
+						}
+						
+						if (level == 7 && oldlevel == 7)
+						{
+							oldlevel = level;
+							level = 0;
+						}
+						else 
+						{
+							oldlevel = level;
+						}
+
+						/* Any unmasked interrupts? Proceess them */
+            if (level == 7 || level > IPL_mask)
             {
                 register uint64_t sp asm("r29");
 
@@ -258,7 +288,8 @@ void MainLoop()
                 }
                 else if (ariv_enabled && level==7)
                 {
-                    asm volatile("ldr %w0, [%1, %2]":"=r"(PC):"r"(0xa10000),"r"(vector)); 
+										ctx->JIT_CONTROL2 |= JC2F_ARACTIVE;
+                    asm volatile("ldr %w0, [%1, %2]":"=r"(PC):"r"(0xa80000),"r"(vector)); 
                 }
                 else
                 {

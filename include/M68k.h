@@ -148,6 +148,9 @@ struct M68KState
 #define JC2B_TRACE_ENABLE               12
 #define JC2F_TRACE_ENABLE               (1 << JC2B_TRACE_ENABLE)
 
+#define JC2B_ARACTIVE                13
+#define JC2F_ARACTIVE                (1 << JC2B_ARACTIVE)
+
 #define DCB_VERBOSE 0
 #define DCB_VERBOSE_MASK 0x3
 #define DCB_DISASM  2

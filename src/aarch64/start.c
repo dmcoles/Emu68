@@ -31,8 +31,14 @@
 
 extern uint8_t hrtmon_enabled;
 extern uint8_t ariv_enabled;
+void *arromdata = NULL;
+uint32_t arromdata_size = 0;
+void *hrtromdata = NULL;
+uint32_t hrtromdata_size = 0;
 
 extern uint8_t debounce_nmi;
+extern uint8_t joystickl7;
+uint8_t customfw = 0;
 
 void _start();
 void _boot();
@@ -581,8 +587,8 @@ void boot(void *dtree)
                 limit_2g = 1;
 #ifdef PISTORM
 
-            hrtmon_enabled = !!find_token(prop->op_value, "hrtmon");
             debounce_nmi = !!find_token(prop->op_value, "debounce_nmi");
+						joystickl7 = !!find_token(prop->op_value, "joystick_l7");
 
 #ifdef PISTORM32LITE
             if (find_token(prop->op_value, "two_slot"))
@@ -866,7 +872,7 @@ void boot(void *dtree)
     platform_init();
 
     /* Test if the image begins with gzip header. If yes, then this is the firmware blob */
-    if (initramfs_size != 0 && ((uint8_t *)initramfs_loc)[0] == 0x1f && ((uint8_t *)initramfs_loc)[1] == 0x8b)
+    while (initramfs_size != 0 && ((uint8_t *)initramfs_loc)[0] == 0x1f && ((uint8_t *)initramfs_loc)[1] == 0x8b)
     {
         struct libdeflate_decompressor *decomp = libdeflate_alloc_decompressor();
         
@@ -881,12 +887,30 @@ void boot(void *dtree)
 
             if (result == LIBDEFLATE_SUCCESS || result == LIBDEFLATE_SHORT_OUTPUT)
             {
+
                 /* Shift the rest of initramfs back to original position. */
-                memcpy(initramfs_loc, (void*)((uintptr_t)initramfs_loc + in_size), initramfs_size - in_size);
-                initramfs_size -= in_size;
+							memcpy(initramfs_loc, (void*)((uintptr_t)initramfs_loc + in_size), initramfs_size - in_size);
+							initramfs_size -= in_size;
+							
+							if (!strncmp(out_buffer+4,"ACTI",4))
+              {
+								arromdata = out_buffer;
+								arromdata_size = out_size;
+								ariv_enabled = 1;
+              }
+							else if (!strncmp(out_buffer+4,"HRT!",4))
+              {
+								hrtromdata = out_buffer;
+								hrtromdata_size = out_size;
+								hrtmon_enabled = 1;
+							}						
+							else
+							{
                 firmware_file = out_buffer;
                 firmware_size = out_size;
-                tlsf_realloc(tlsf, out_buffer, out_size);
+								customfw = 1;
+							}
+              tlsf_realloc(tlsf, out_buffer, out_size);					
             }
             else
             {
@@ -896,7 +920,8 @@ void boot(void *dtree)
             libdeflate_free_decompressor(decomp);
         }
     }
-    else
+    
+		if (!customfw)
     {
 #ifdef PISTORM32LITE
         #include "../pistorm/efinix_firmware.h"
@@ -928,41 +953,24 @@ void boot(void *dtree)
 #endif
     }
 
-    if (hrtmon_enabled)
+    if (hrtmon_enabled && !ariv_enabled)
     {
-#include "../src/hrtmon.rom.h"
-        struct libdeflate_decompressor *decomp = libdeflate_alloc_decompressor();
+        const uint32_t hrt_size = 0xa80000-0xa10000;
 
-        if (decomp != NULL)
-        {
-            const uint32_t hrt_size = 0xa80000-0xa10000;
-            void *out_buffer = tlsf_malloc(tlsf, hrt_size);
-            size_t in_size = 0;
-            size_t out_size = 0;
-            enum libdeflate_result result;
+				// Configure hrtmon
+				uint8_t* hrt = hrtromdata;
+				*(uint16_t*)(hrt + 24) = 0x05a; // color0
+				*(uint16_t*)(hrt + 26) = 0xfff; // color1
+				hrt[33] = 1; // AGA
+				hrt[34] = 1; // Insert
+				hrt[39] = -1; // Don't move VBR
+				hrt[40] = 0; // Not entered
+				hrt[41] = 1; // Hex mode
+				*(uint32_t*)(hrt + 68) = 2*1024*1024; // Max chip
 
-            result = libdeflate_gzip_decompress_ex(decomp, hrtrom, hrtrom_len, out_buffer, hrt_size, &in_size, &out_size);
-
-            if (result == LIBDEFLATE_SUCCESS)
-            {
-                // Configure hrtmon
-                uint8_t* hrt = out_buffer;
-                *(uint16_t*)(hrt + 24) = 0x05a; // color0
-                *(uint16_t*)(hrt + 26) = 0xfff; // color1
-                hrt[33] = 1; // AGA
-                hrt[34] = 1; // Insert
-                hrt[39] = -1; // Don't move VBR
-                hrt[40] = 0; // Not entered
-                hrt[41] = 1; // Hex mode
-                *(uint32_t*)(hrt + 68) = 2*1024*1024; // Max chip
-
-                const uint32_t dest_addr = 0xa10000;
-                mmu_map(dest_addr, dest_addr, hrt_size, MMU_ACCESS | MMU_ISHARE | MMU_ALLOW_EL0 | MMU_ATTR_CACHED, 0);
-                DuffCopy((void*)(0xffffff9000000000 | dest_addr), out_buffer, (out_size+3) / 4);
-            }
-            tlsf_free(tlsf, out_buffer);
-            libdeflate_free_decompressor(decomp);
-        }
+				const uint32_t dest_addr = 0xa10000;
+				mmu_map(dest_addr, dest_addr, hrt_size, MMU_ACCESS | MMU_ISHARE | MMU_ALLOW_EL0 | MMU_ATTR_CACHED, 0);
+				DuffCopy((void*)(0xffffff9000000000 | dest_addr), hrtromdata, (hrtromdata_size+3) / 4);
     }
 
 #ifdef PISTORM32LITE
@@ -2184,33 +2192,14 @@ void M68K_StartEmu(void *addr, void *fdt)
             if (strstr(prop->op_value, "enable_d0_slow"))
                 mmu_map(0xd00000, 0xd00000, 524288, MMU_ACCESS | MMU_ISHARE | MMU_ALLOW_EL0 | MMU_ATTR_CACHED, 0);
 
-            if (strstr(prop->op_value, "ariv") && !hrtmon_enabled)
-            {
-#include "../src/ariv.rom.h"
-                struct libdeflate_decompressor *decomp = libdeflate_alloc_decompressor();
-
-                if (decomp != NULL)
-                {
-                    //const uint32_t ariv_size = 0x60000;
-					const uint32_t ariv_size = 0x160000;
-                    const uint32_t dest_addr = 0xA10000;
-                    void *out_buffer = tlsf_malloc(tlsf, ariv_size);
-                    size_t in_size = 0;
-                    size_t out_size = 0;
-                    enum libdeflate_result result;
-
-                    mmu_map(dest_addr, dest_addr, ariv_size, MMU_ACCESS | MMU_ISHARE | MMU_ALLOW_EL0 | MMU_ATTR_CACHED, 0);
-                    result = libdeflate_gzip_decompress_ex(decomp, arivrom, arivrom_len, out_buffer, ariv_size, &in_size, &out_size);
-
-                    if (result == LIBDEFLATE_SUCCESS)
-                    {
-                        DuffCopy((void*)(0xffffff9000000000 | dest_addr), out_buffer, (out_size+3) / 4);
-                        ariv_enabled = 1;
-                    }
-                    tlsf_free(tlsf, out_buffer);
-                    libdeflate_free_decompressor(decomp);
-                }
-            }
+							if (ariv_enabled)
+							{
+								const uint32_t ariv_size = 0x160000;
+								const uint32_t dest_addr = 0xA80000;
+								mmu_map(dest_addr, dest_addr,0x40000, MMU_ACCESS | MMU_ISHARE | MMU_ALLOW_EL0 | MMU_READ_ONLY | MMU_ATTR_CACHED, 0);
+								mmu_map(dest_addr+0x40000, dest_addr+0x40000, ariv_size-0x40000, MMU_ACCESS | MMU_ISHARE | MMU_ALLOW_EL0 | MMU_ATTR_CACHED, 0);
+								DuffCopy((void*)(0xffffff9000000000 | dest_addr), arromdata, (arromdata_size+3) / 4);
+							}
 
             extern int disasm;
             extern int debug;

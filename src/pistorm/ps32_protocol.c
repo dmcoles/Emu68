@@ -22,6 +22,36 @@
 
 extern struct M68KState *__m68k_state;
 
+uint8_t ariv_enabled = 0;
+uint8_t hrtmon_enabled = 0;
+uint8_t debounce_nmi = 0;
+uint8_t joystickl7 = 0;
+uint8_t	joyl7trigger = 0;
+uint8_t was_down = 0;
+uint32_t cnt = 0;
+
+volatile struct {
+    uint8_t owner;
+    uint32_t lock_count;
+} spin_lock;
+
+void lock(uint8_t owner)
+{
+    if (spin_lock.owner != owner) {
+        while (!__sync_bool_compare_and_swap(&spin_lock.owner, 0, owner))
+            asm volatile("yield");
+    }
+    ++spin_lock.lock_count;
+}
+
+void unlock(void)
+{
+    if (--spin_lock.lock_count == 0) {
+        spin_lock.owner = 0;
+        __sync_synchronize();
+    }
+}
+
 static void usleep(uint64_t delta)
 {
     uint64_t hi = LE32(*(volatile uint32_t*)0xf2003008);
@@ -183,7 +213,7 @@ typedef unsigned int uint;
 #define DIRECTION_INPUT 0
 #define DIRECTION_OUTPUT 1
 
-volatile uint32_t *gpio;
+volatile uint32_t *gpio = 0;
 volatile uint32_t *gpset;
 volatile uint32_t *gpreset;
 volatile uint32_t *gpread;
@@ -1606,6 +1636,32 @@ void ps_housekeeper()
                 if (__m68k_state->INT.IPL)
                     asm volatile("sev":::"memory");
             }
+
+            if ((hrtmon_enabled || ariv_enabled) && joystickl7 && ++cnt >= 100000)
+						{
+							lock(2);
+							joyl7trigger = 0;
+							// Pin must be set to input mode
+							// Otherwise triggers in CD32 game pad detection routines
+							if ((ps_read_8(0xbfe201) & 0xc0) == 0) {
+									//check mouse + joystick button pressed								
+									const uint8_t down = (ps_read_8(0xbfe001) & 0xc0) == 0;
+
+									if (down) {
+											if (!was_down) {
+												__m68k_state->INT.IPL = 7;
+												asm volatile("":::"memory");
+												asm volatile("sev":::"memory");
+											}
+											was_down = 1;
+									} else if (was_down) {
+											was_down = 0;
+									}
+							}
+							unlock();
+							cnt = 0;
+						}
+
 
             pin_prev = pin;
 

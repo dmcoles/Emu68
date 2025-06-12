@@ -17,7 +17,7 @@
 #include "M68k.h"
 #include "cache.h"
 
-volatile unsigned int *gpio;
+volatile unsigned int *gpio = 0;
 volatile unsigned int *gpclk;
 
 unsigned int gpfsel0;
@@ -818,12 +818,12 @@ void ps_housekeeper()
         if (housekeeper_enabled)
         {
             uint32_t pin = LE32(*(gpio + 13));
-            __m68k_state->INT.IPL = (pin & (1 << PIN_IPL_ZERO)) ? 0 : 1;
-
+            __m68k_state->INT.IPL = ((pin & (1 << PIN_IPL_ZERO)) ? 0 : 1);
             asm volatile("":::"memory");
 
             if (__m68k_state->INT.IPL)
                 asm volatile("sev":::"memory");
+
 
             if ((pin & (1 << PIN_RESET)) == 0) {
                 kprintf("[HKEEP] Houskeeper will reset RasPi now...\n");
