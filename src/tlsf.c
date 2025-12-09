@@ -7,6 +7,7 @@
 
 #include "support.h"
 #include "tlsf.h"
+#include "spinlock.h"
 
 #undef USE_MACROS
 
@@ -25,11 +26,7 @@
  */
 #define MAX_LOG2_SLI    (5)
 #define MAX_SLI         (1 << MAX_LOG2_SLI)
-#if __WORDSIZE == 64
-#define MAX_FLI         (32+7)
-#else
-#define MAX_FLI         (32)
-#endif
+#define MAX_FLI         (30)
 #define FLI_OFFSET      (6)
 #define SMALL_BLOCK     (2 << FLI_OFFSET)
 
@@ -55,7 +52,7 @@
 /* Size of additional memory needed to manage new block */
 #define HEADERS_SIZE (((3 * ROUNDUP(sizeof(hdr_t))) + ROUNDUP(sizeof(tlsf_area_t))))
 
-/* free node links together all free blocks if similar size */
+/* free node links together all free blocks of similar size */
 typedef struct free_node_s {
     struct bhdr_s *    prev;
     struct bhdr_s *    next;
@@ -91,6 +88,8 @@ typedef struct tlsf_area_s {
 } tlsf_area_t;
 
 typedef struct {
+    spinlock_t          lock;
+
     tlsf_area_t *       memory_area;
 
     uintptr_t           total_size;
@@ -186,51 +185,16 @@ static inline __attribute__((always_inline)) bhdr_t * FIND_SUITABLE_BLOCK(tlsf_t
     return b;
 }
 
-
-#ifdef USE_MACROS
-
-#define GET_SIZE(b) ({ IPTR size = b->header.length & SIZE_MASK; size; })
-#define GET_FLAGS(b) ({ IPTR flags = b->header.length & (THIS_FREE_MASK | PREV_FREE_MASK); flags; })
-#define SET_SIZE(b, size) do{ b->header.length = GET_FLAGS(b) | (size); }while(0)
-#define SET_FLAGS(b, flags) do{ b->header.length = GET_SIZE(b) | (flags); }while(0)
-#define SET_SIZE_AND_FLAGS(b, size, flags) do{b->header.length = (size) | (flags);}while(0)
-#define FREE_BLOCK(b) ((b->header.length & THIS_FREE_MASK) == THIS_FREE)
-#define SET_FREE_BLOCK(b) do{b->header.length = (b->header.length & ~THIS_FREE_MASK) | THIS_FREE;}while(0)
-#define SET_BUSY_BLOCK(b) do{b->header.length = (b->header.length & ~THIS_FREE_MASK) | THIS_BUSY;}while(0)
-#define SET_FREE_PREV_BLOCK(b) do{b->header.length = (b->header.length & ~PREV_FREE_MASK) | PREV_FREE;}while(0)
-#define SET_BUSY_PREV_BLOCK(b) do{b->header.length = (b->header.length & ~PREV_FREE_MASK) | PREV_BUSY;}while(0)
-#define FREE_PREV_BLOCK(b) ((b->header.length & PREV_FREE_MASK) == PREV_FREE)
-#define GET_NEXT_BHDR(hdr, size) ({ bhdr_t * __b = (bhdr_t *)((UBYTE *)&hdr->mem[0] + (size)); __b; })
-#define MEM_TO_BHDR(ptr) ({ bhdr_t * b = (bhdr_t*)((void*)(ptr) - offsetof(bhdr_t, mem)); b; })
-
-#define REMOVE_HEADER(tlsf, b, fl, sl) do{ \
-        if (b->free_node.next)                                          \
-            b->free_node.next->free_node.prev = b->free_node.prev;      \
-        if (b->free_node.prev)                                          \
-            b->free_node.prev->free_node.next = b->free_node.next;      \
-        if (tlsf->matrix[fl][sl] == b) {                                \
-            tlsf->matrix[fl][sl] = b->free_node.next;                   \
-            if (!tlsf->matrix[fl][sl])                                  \
-                ClrBit(sl, &tlsf->slbitmap[fl]);                        \
-            if (!tlsf->slbitmap[fl])                                    \
-                ClrBit(fl, &tlsf->flbitmap);                            \
-        } } while(0)
-
-#define INSERT_FREE_BLOCK(tlsf, b) do {                     \
-    int fl, sl; MAPPING_INSERT(GET_SIZE(b), &fl, &sl);      \
-    b->free_node.prev = NULL;                               \
-    b->free_node.next = tlsf->matrix[fl][sl];               \
-    if (tlsf->matrix[fl][sl])                               \
-        tlsf->matrix[fl][sl]->free_node.prev = b;           \
-    tlsf->matrix[fl][sl] = b;                               \
-    SetBit(fl, &tlsf->flbitmap);                            \
-    SetBit(sl, &tlsf->slbitmap[fl]); }while(0)
-
-#else
-
 static inline __attribute__((always_inline)) uintptr_t GET_SIZE(bhdr_t *b)
 {
-    return b->header.length & SIZE_MASK;
+    uintptr_t size = b->header.length & SIZE_MASK;
+    if (size > 0xffffffff) {
+        kprintf("ERROR! GET_SIZE block %p with size=%p\n", b, size);
+        kprintf("  caller %p\n", __builtin_return_address(0));
+
+        while(1) asm volatile("wfe");
+    }
+    return size;
 }
 
 static inline __attribute__((always_inline)) uintptr_t GET_FLAGS(bhdr_t *b)
@@ -240,11 +204,19 @@ static inline __attribute__((always_inline)) uintptr_t GET_FLAGS(bhdr_t *b)
 
 static inline __attribute__((always_inline)) void SET_SIZE(bhdr_t *b, uintptr_t size)
 {
+    if (size > 0xffffffff) {
+        kprintf("ERROR! SET_SIZE on block %p with size=%p\n", b, size);
+        while(1) asm volatile("wfe");
+    }
     b->header.length = GET_FLAGS(b) | size;
 }
 
 static inline __attribute__((always_inline)) void SET_SIZE_AND_FLAGS(bhdr_t *b, uintptr_t size, uintptr_t flags)
 {
+    if (size > 0xffffffff) {
+        kprintf("ERROR! SET_SIZE_AND_FLAGS on block %p with size=%p\n", b, size);
+        while(1) asm volatile("wfe");
+    }
     b->header.length = size | flags;
 }
 
@@ -290,10 +262,16 @@ static inline __attribute__((always_inline)) bhdr_t * MEM_TO_BHDR(void *ptr)
 
 static inline __attribute__((always_inline)) void REMOVE_HEADER(tlsf_t *tlsf, bhdr_t *b, int fl, int sl)
 {
+    if (GET_SIZE(b) == 0) {
+        return;
+    }
+
     if (b->free_node.next)
         b->free_node.next->free_node.prev = b->free_node.prev;
     if (b->free_node.prev)
         b->free_node.prev->free_node.next = b->free_node.next;
+
+    tlsf->free_size -= GET_SIZE(b);
 
     if (tlsf->matrix[fl][sl] == b)
     {
@@ -309,6 +287,18 @@ static inline __attribute__((always_inline)) void INSERT_FREE_BLOCK(tlsf_t *tlsf
 {
     int fl, sl;
 
+    /* 
+        bhdr of length 0 consists of a header only, no extra data. This can happen and 
+        we still maintain it - it will eventually merge with previous or next header
+        at some point
+    */
+    if (GET_SIZE(b) == 0)
+    {
+        return;
+    }
+
+    tlsf->free_size += GET_SIZE(b);
+
     MAPPING_INSERT(GET_SIZE(b), &fl, &sl);
 
     b->free_node.prev = NULL;
@@ -323,17 +313,10 @@ static inline __attribute__((always_inline)) void INSERT_FREE_BLOCK(tlsf_t *tlsf
     SetBit(sl, &tlsf->slbitmap[fl]);
 }
 
-#endif /* USE_MACROS */
-
-void * tlsf_malloc(void *t, uintptr_t size)
+static bhdr_t * tlsf_intern_malloc(tlsf_t *tlsf, uintptr_t size)
 {
-    tlsf_t *tlsf = t;
-    int fl, sl;
     bhdr_t *b = NULL;
-
-    size = ROUNDUP(size);
-
-    if (unlikely(!size)) return NULL;
+    int fl, sl;
 
     /* Find the indices fl and sl for given size */
     MAPPING_SEARCH(&size, &fl, &sl);
@@ -388,8 +371,26 @@ void * tlsf_malloc(void *t, uintptr_t size)
     b->free_node.next = NULL;
     b->free_node.prev = NULL;
 
-    /* Update counters */
-    tlsf->free_size -= GET_SIZE(b);
+    return b;
+}
+
+void * tlsf_malloc(void *t, uintptr_t size)
+{
+    tlsf_t *tlsf = t;
+    bhdr_t *b = NULL;
+
+    size = ROUNDUP(size);
+
+    if (unlikely(!size)) return NULL;
+
+    spinlock_acquire(&tlsf->lock);
+
+    b = tlsf_intern_malloc(tlsf, size);
+
+    spinlock_release(&tlsf->lock);
+
+    /* Special case for NULL return */
+    if (b == NULL) return NULL;
 
     /* And return memory */
     return &b->mem[0];
@@ -453,18 +454,26 @@ void * tlsf_malloc_aligned(void *t, uintptr_t size, uintptr_t align)
     bhdr_t *b;
 
     size = ROUNDUP(size);
+    
+    if (align < SIZE_ALIGN) align = SIZE_ALIGN;
+    if (align > 2*1024*1024) align = 2*1024*1024;
 
     /* Adjust align to the top nearest power of two */
     align = 1 << MS(align);
 
-    ptr = tlsf_malloc(tlsf, size + align);
+    spinlock_acquire(&tlsf->lock);
 
-    if (!ptr)
-    {
+    /* Call intern malloc (non-locking) */
+    b = tlsf_intern_malloc(tlsf, size + align);
+
+    /* Exit early if allocation failed */
+    if (b == NULL) {
+        spinlock_release(&tlsf->lock);
         return NULL;
     }
 
-    b = MEM_TO_BHDR(ptr);
+    /* Convert bhdr_t to pointer */
+    ptr = &b->mem[0];
 
     if (align > SIZE_ALIGN)
     {
@@ -473,15 +482,16 @@ void * tlsf_malloc_aligned(void *t, uintptr_t size, uintptr_t align)
         uintptr_t diff_begin = (uintptr_t)aligned_bhdr - (uintptr_t)b;
         uintptr_t diff_end = (uintptr_t)GET_NEXT_BHDR(b, GET_SIZE(b)) - (uintptr_t)GET_NEXT_BHDR(aligned_bhdr, size);
 
+        /* Aligned block is busy and has given size*/
         SET_SIZE(aligned_bhdr, size);
+        SET_BUSY_BLOCK(aligned_bhdr);
 
+        /* If aligned block does not start at the original malloc result, free the diff space at begin */
         if (aligned_ptr != ptr)
         {
-            if (diff_begin > 0)
+            if (diff_begin >= ROUNDUP(sizeof(hdr_t)))
             {
                 SET_SIZE(b, diff_begin - ROUNDUP(sizeof(hdr_t)));
-
-                tlsf->free_size += GET_SIZE(b);
 
                 aligned_bhdr->header.prev = b;
                 SET_FREE_PREV_BLOCK(aligned_bhdr);
@@ -496,7 +506,7 @@ void * tlsf_malloc_aligned(void *t, uintptr_t size, uintptr_t align)
             ptr = &aligned_bhdr->mem[0];
         }
 
-        if (diff_end > 0)
+        if (diff_end >= ROUNDUP(sizeof(hdr_t)))
         {
             bhdr_t *b1 = GET_NEXT_BHDR(aligned_bhdr, GET_SIZE(aligned_bhdr));
             bhdr_t *next;
@@ -507,15 +517,17 @@ void * tlsf_malloc_aligned(void *t, uintptr_t size, uintptr_t align)
             SET_BUSY_PREV_BLOCK(b1);
             SET_FREE_BLOCK(b1);
 
+            b1 = MERGE_NEXT(tlsf, b1);
+
             next = GET_NEXT_BHDR(b1, GET_SIZE(b1));
             next->header.prev = b1;
             SET_FREE_PREV_BLOCK(next);
 
-            b1 = MERGE_NEXT(tlsf, b1);
-
             INSERT_FREE_BLOCK(tlsf, b1);
         }
     }
+
+    spinlock_release(&tlsf->lock);
 
     return ptr;
 }
@@ -529,13 +541,12 @@ void tlsf_free(void *t, void *ptr)
     if (unlikely(!ptr))
         return;
 
+    spinlock_acquire(&tlsf->lock);
+
     fb = MEM_TO_BHDR(ptr);
 
     /* Mark block as free */
     SET_FREE_BLOCK(fb);
-
-    /* adjust free size field on tlsf */
-    tlsf->free_size += GET_SIZE(fb);
 
     /* Try to merge with previous and next blocks (if free) */
     fb = MERGE_PREV(tlsf, fb);
@@ -548,6 +559,8 @@ void tlsf_free(void *t, void *ptr)
 
     /* Insert free block into the proper list */
     INSERT_FREE_BLOCK(tlsf, fb);
+
+    spinlock_release(&tlsf->lock);
 }
 
 uintptr_t tlsf_get_free_size(void *t)
@@ -590,10 +603,12 @@ void *tlsf_realloc(void *t, void *ptr, uintptr_t new_size)
     if (unlikely(new_size == GET_SIZE(b)))
         return ptr;
 
+    spinlock_acquire(&tlsf->lock);
+
     bnext = GET_NEXT_BHDR(b, GET_SIZE(b));
 
-    /* Is new size smaller than the previous one? Try to split the block if this is the case */
-    if (new_size <= (GET_SIZE(b)))
+    /* Shrink: only if we can create a valid free block */
+    if (new_size <= GET_SIZE(b) - ROUNDUP(sizeof(hdr_t)))
     {
         /* New header starts right after the current block b */
         bhdr_t * b1 = GET_NEXT_BHDR(b, new_size);
@@ -605,8 +620,6 @@ void *tlsf_realloc(void *t, void *ptr, uintptr_t new_size)
         /* Current block gets smaller */
         SET_SIZE(b, new_size);
 
-        tlsf->free_size += GET_SIZE(b1);
-
         /* Try to merge with next block */
         b1 = MERGE_NEXT(tlsf, b1);
 
@@ -617,62 +630,61 @@ void *tlsf_realloc(void *t, void *ptr, uintptr_t new_size)
 
         /* Insert free block into the proper list */
         INSERT_FREE_BLOCK(tlsf, b1);
+
+        spinlock_release(&tlsf->lock);
+
+        return ptr;
     }
-    else
+    /* Grow: try to absorb next block if free and large enough */
+    else if (FREE_BLOCK(bnext) && new_size <= GET_SIZE(b) + GET_SIZE(bnext) + ROUNDUP(sizeof(hdr_t)))
     {
-        /* Is next block free? Is there enough free space? */
-        if (FREE_BLOCK(bnext) && new_size <= GET_SIZE(b) + GET_SIZE(bnext) + ROUNDUP(sizeof(hdr_t)))
+        uintptr_t total_size = GET_SIZE(b) + GET_SIZE(bnext) + ROUNDUP(sizeof(hdr_t));
+        uintptr_t rest_size = total_size - new_size;
+
+        MAPPING_INSERT(GET_SIZE(bnext), &fl, &sl);
+
+        REMOVE_HEADER(tlsf, bnext, fl, sl);
+
+        if (rest_size >= ROUNDUP(sizeof(hdr_t)))
         {
-            bhdr_t *b1;
-            uintptr_t rest_size = ROUNDUP(sizeof(hdr_t)) + GET_SIZE(bnext) + GET_SIZE(b) - new_size;
+            /* Split: allocated block + new free block */
+            SET_SIZE(b, new_size);
 
-            MAPPING_INSERT(GET_SIZE(bnext), &fl, &sl);
+            bhdr_t *b1 = GET_NEXT_BHDR(b, new_size);
+            b1->header.prev = b;
+            SET_SIZE_AND_FLAGS(b1, rest_size - ROUNDUP(sizeof(hdr_t)), THIS_FREE | PREV_BUSY);
 
-            REMOVE_HEADER(tlsf, bnext, fl, sl);
+            bnext = GET_NEXT_BHDR(b1, GET_SIZE(b1));
+            bnext->header.prev = b1;
+            SET_FREE_PREV_BLOCK(bnext);
 
-            if (rest_size > ROUNDUP(sizeof(hdr_t)))
-            {
-                rest_size -= ROUNDUP(sizeof(hdr_t));
-
-                SET_SIZE(b, new_size);
-
-                b1 = GET_NEXT_BHDR(b, GET_SIZE(b));
-                b1->header.prev = b;
-
-                SET_SIZE_AND_FLAGS(b1, rest_size, THIS_FREE | PREV_BUSY);
-
-                bnext = GET_NEXT_BHDR(b1, GET_SIZE(b1));
-                bnext->header.prev = b1;
-                SET_FREE_PREV_BLOCK(bnext);
-
-                INSERT_FREE_BLOCK(tlsf, b1);
-            }
-            else
-            {
-                if (rest_size)
-                    SET_SIZE(b, new_size + ROUNDUP(sizeof(hdr_t)));
-                else
-                    SET_SIZE(b, new_size);
-
-                bnext = GET_NEXT_BHDR(b, GET_SIZE(b));
-                bnext->header.prev = b;
-                SET_BUSY_PREV_BLOCK(bnext);
-            }
+            INSERT_FREE_BLOCK(tlsf, b1);
         }
         else
         {
-            /* Next block was not free. Create new buffer and copy old contents there */
-            void * p = tlsf_malloc(tlsf, new_size);
-            if (p)
-            {
-                memcpy(p, ptr, GET_SIZE(b));
-                tlsf_free(tlsf, ptr);
-                b = MEM_TO_BHDR(p);
-            }
-        }
-    }
+            /* Keep all space in allocated block */
+            SET_SIZE(b, total_size);
 
-    return b->mem;
+            bnext = GET_NEXT_BHDR(b, GET_SIZE(b));
+            bnext->header.prev = b;
+            SET_BUSY_PREV_BLOCK(bnext);
+        }
+
+        spinlock_release(&tlsf->lock);
+
+        return ptr;
+    }
+    /* Can't grow in place: allocate new block */
+    else
+    {
+        spinlock_release(&tlsf->lock);
+
+        void * p = tlsf_malloc(tlsf, new_size);
+        uintptr_t copy_size = GET_SIZE(b) < new_size ? GET_SIZE(b) : new_size;
+        memcpy(p, ptr, copy_size);
+        tlsf_free(tlsf, ptr);
+        return p;
+    }
 }
 
 /* Allocation of headers in memory:
@@ -744,6 +756,8 @@ void * tlsf_init()
     if (tlsf)
     {
         bzero(tlsf, sizeof(tlsf_t));
+
+        spinlock_init(&tlsf->lock);
     }
 
     return tlsf;
@@ -758,6 +772,9 @@ void * tlsf_init_with_memory(void *memory, uintptr_t size)
     size -= tlsf_size;
 
     bzero(tlsf, tlsf_size);
+
+    spinlock_init(&tlsf->lock);
+
     tlsf_add_memory(tlsf, memory, size);
 
     return tlsf;
