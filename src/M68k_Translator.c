@@ -33,6 +33,7 @@ options_t Options = {
 
 int disasm = 0;
 int debug = 0;
+uint8_t tracereg;
 const int debug_cnt = 0;
 
 static inline int globalDebug() {
@@ -418,6 +419,15 @@ static inline uintptr_t M68K_Translate(uint16_t *M68kCodePtr, uint32_t *arm_star
         local_state[insn_count].mls_M68kPtr = ctx.tc_M68kCodePtr;
         local_state[insn_count].mls_PCRel = _pc_rel;
 
+        if (__m68k_state->JIT_CONTROL2 & JC2F_TRACE_ENABLE)
+        {
+            uint8_t cc = RA_GetCC(&ctx);
+            tracereg = RA_AllocARMRegister(&ctx);
+						EMIT(&ctx,
+							mov_reg(tracereg, cc)
+						);
+        }
+			
         insn_consumed = EmitINSN(&ctx);
 
         if (ctx.tc_M68kCodePtr < m68k_low)
@@ -426,6 +436,13 @@ static inline uintptr_t M68K_Translate(uint16_t *M68kCodePtr, uint32_t *arm_star
             m68k_high = ctx.tc_M68kCodePtr;
 
         insn_count+=insn_consumed;
+
+				
+        if (__m68k_state->JIT_CONTROL2 & JC2F_TRACE_ENABLE)
+        {
+            break_loop = TRUE;
+        }				
+	
         if (ctx.tc_CodePtr[-1] == INSN_TO_LE(0xfffffff0))
         {
             lr_is_saved = 1;
@@ -583,6 +600,19 @@ static inline uintptr_t M68K_Translate(uint16_t *M68kCodePtr, uint32_t *arm_star
     RA_FlushM68kRegs(&ctx);
 
     EMIT_FlushPC(&ctx);
+
+    if (__m68k_state->JIT_CONTROL2 & JC2F_TRACE_ENABLE)
+    {
+        uint32_t *branch_inst_ptr;
+        branch_inst_ptr = ctx.tc_CodePtr;
+        EMIT(&ctx,
+             tbz(tracereg, SRB_T1,0)
+             );
+        EMIT_Exception(&ctx, VECTOR_TRACE, 2);
+        *branch_inst_ptr = tbz(tracereg, SRB_T1, ctx.tc_CodePtr - branch_inst_ptr);
+        RA_FreeARMRegister(&ctx, tracereg);
+    }
+
     RA_FlushCC(&ctx);
     RA_FlushFPCR(&ctx);
     RA_FlushFPSR(&ctx);

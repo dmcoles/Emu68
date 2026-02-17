@@ -54,6 +54,13 @@ extern struct List ICache[EMU68_HASHSIZE];
 void M68K_LoadContext(struct M68KState *ctx);
 void M68K_SaveContext(struct M68KState *ctx);
 
+extern uint8_t debounce_nmi;
+extern uint8_t ariv_enabled;
+extern uint8_t hrtmon_enabled;
+
+extern volatile uint32_t *gpio;
+int SYSReadValFromAddr(uint64_t *value, uint64_t *value2, int size, uint64_t far);
+
 struct Entry {
     uintptr_t m68k;
     uint32_t *arm;
@@ -294,6 +301,7 @@ static inline int GetIPLLevel() { return 0; }
 void MainLoop()
 {
     uint32_t LastPC;
+    int oldlevel = 0;
     struct M68KState *ctx = getCTX();
 
     LRU_InvalidateAll();
@@ -378,6 +386,31 @@ void MainLoop()
 
             int IPL_mask = (SR & SR_IPL) >> SRB_IPL;
 
+            asm volatile("":"=r"(PC));
+
+						//debounce nmi
+            if (ariv_enabled && (level == 7) && (ctx->JIT_CONTROL2 & JC2F_ARACTIVE))	{
+							level = 0;
+						}
+
+            if (ariv_enabled && (level == 7) && (((uint64_t)PC&0xffffffff)>=0xa80000) && (((uint64_t)PC&0xffffffff)<0xac0000))	{
+							level = 0;
+						}
+
+            if (hrtmon_enabled && (level == 7) && (((uint64_t)PC&0xffffffff)>=0xa10000) && (((uint64_t)PC&0xffffffff)<0xa80000))	{
+							level = 0;
+						}
+
+						if (level == 7 && oldlevel == 7)
+						{
+							oldlevel = level;
+							level = 0;
+						}
+						else 
+						{
+							oldlevel = level;
+						}
+
             /* Any unmasked interrupts? Proceess them */
             if (level == 7 || level > IPL_mask)
             {
@@ -426,8 +459,21 @@ void MainLoop()
                 /* Get VBR */
                 vbr = ctx->VBR;
 
-                /* Load PC */
-                __asm__ volatile("ldr %w0, [%1, %2]":"=r"(PC):"r"(vbr),"r"(vector)); 
+                if (ariv_enabled && level==7)
+                {
+										ctx->JIT_CONTROL2 |= JC2F_ARACTIVE;
+                    __asm__ volatile("ldr %w0, [%1, %2]":"=r"(PC):"r"(0xa80000),"r"(vector)); 
+                }
+                else if (hrtmon_enabled && level==7)
+                {
+                    __asm__ volatile("movz    %w0, #0x000c":"=r"(PC)); 
+                    __asm__ volatile("movk    %w0, #0x00a1, lsl #16 ":"=r"(PC)); 
+                }
+                else
+                {
+										/* Load PC */
+                    __asm__ volatile("ldr %w0, [%1, %2]":"=r"(PC):"r"(vbr),"r"(vector)); 
+								}
             }
 
             /* All interrupts masked or new PC loaded and stack swapped, continue with code execution */

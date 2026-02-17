@@ -95,6 +95,9 @@ static const int REGMAP[32] = {
 #define LOAD_CONTEXT    LOAD_SHORT_CONTEXT
 #endif
 
+extern void lock(uint8_t owner);
+extern void unlock(void);
+
 struct INT_shadow {
     uint16_t INTENA;
     uint16_t INTREQ;
@@ -347,6 +350,8 @@ extern int zorro_disable;
 
 int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
 {
+    extern uint8_t ariv_enabled;
+
     D(kprintf("[JIT:SYS] SYSWriteValToAddr(0x%x, %d, %p)\n", value, size, far));
 
     /*
@@ -360,6 +365,30 @@ int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
     if ((far >> 32) != 0) {
         kprintf("Write in high memory with far %p, size %d, value %08x\n", far, size, value);
         return 0;
+    }
+
+
+    if (ariv_enabled && far >= 0xdff000 && far <0xe00000)
+    {
+	switch(size)
+	{
+		case 1:
+				*(uint8_t*)((far & 0x1ff ) + 0xffffff9000acf000) = value;
+				break;
+		case 2:
+				*(uint16_t*)((far & 0x1ff ) + 0xffffff9000acf000) = value;
+				break;
+		case 4:
+				*(uint32_t*)((far & 0x1ff ) + 0xffffff9000acf000) = value;
+				break;
+		case 8:
+				*(uint64_t*)((far & 0x1ff ) + 0xffffff9000acf000) = value;
+				break;
+		case 16:
+				*(uint64_t*)((far & 0x1ff ) + 0xffffff9000acf000) = value;
+				*(uint64_t*)((far & 0x1ff ) + 0xffffff9000acf008) = value2;
+				break;
+	}
     }
 
     if (far == INTENA) {
@@ -2215,6 +2244,8 @@ void SYSHandler(uint32_t vector, uint64_t *ctx)
    
     cpu_id &= 3;
 
+    lock(1);
+
     if ((vector & 0x1ff) == 0x00 && (esr & 0xf8000000) == 0x90000000)
     {
         int writeFault = (esr & (1 << 6)) != 0;
@@ -2357,6 +2388,8 @@ void SYSHandler(uint32_t vector, uint64_t *ctx)
             __asm__ volatile("msr ELR_EL1, %0"::"r"(elr));
         }
     }
+
+   unlock();
 
     if (!handled)
     {

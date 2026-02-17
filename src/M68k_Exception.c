@@ -13,6 +13,10 @@
 #include "M68k.h"
 #include "RegisterAllocator.h"
 
+extern uint8_t tracereg;
+extern struct M68KState *__m68k_state;
+//extern uint8_t ariv_enabled;
+
 void EMIT_Exception(struct TranslatorContext *ctx, uint16_t exception, uint8_t format, ...)
 {
     va_list args;
@@ -84,6 +88,11 @@ void EMIT_Exception(struct TranslatorContext *ctx, uint16_t exception, uint8_t f
     {
         EMIT(ctx, ldr64_offset_postindex(31, 30, 8));
     }
+
+		if (__m68k_state->JIT_CONTROL2 & JC2F_TRACE_ENABLE)
+		{	
+			EMIT(ctx, mov_reg(tracereg, sr));		
+		}
 
     va_end(args);
 }
